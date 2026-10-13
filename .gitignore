@@ -1,0 +1,19 @@
+# Confidential - Friend's proprietary tester (Do not track or commit)
+config-tester-v4.py
+*tester*v4*
+*testerv4*
+
+# Python & Environment
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+*.tmp
+*.log
+
+# OS artifacts
+Thumbs.db
+Desktop.ini
+.DS_Store
