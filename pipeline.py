@@ -15,7 +15,7 @@ import subprocess
 import sys
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-TESTER_SCRIPT = os.path.join(r"C:\Users\nima\Desktop", "config-tester-v4.py")
+TESTER_SCRIPT = os.path.join(BASE_DIR, "config-tester-v4.py")
 XRAY_PATH = r"D:\v2rayN-windows-64-desktop\v2rayN-windows-64\bin\xray\xray.exe"
 SINGBOX_PATH = r"D:\v2rayN-windows-64-desktop\v2rayN-windows-64\bin\sing_box\sing-box.exe"
 SUB_FILE = os.path.join(BASE_DIR, "output", "sub.txt")
