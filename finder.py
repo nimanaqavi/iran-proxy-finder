@@ -23,57 +23,113 @@ def extract_ips(source_text: str) -> set[str]:
     """Extract unique IPv4 addresses from text, URLs, configs, or raw dumps."""
     return set(IPV4_RE.findall(source_text))
 
-async def test_socks5(ip: str, port: int, timeout: float = 2.5) -> tuple[bool, float]:
+async def test_socks5(ip: str, port: int, timeout: float = 2.0) -> tuple[bool, float]:
     """
     Pure stdlib asyncio SOCKS5 handshake directly against Telegram DC4.
-    Returns (is_working, latency_ms).
+    Returns (is_working, latency_ms). Fast sub-timeouts on handshake to discard non-SOCKS immediately.
     """
     t0 = time.perf_counter()
+    writer = None
     try:
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(ip, port), timeout=timeout
         )
         # SOCKS5 greeting: VER=5, NMETHODS=1, METHOD=0 (No Auth)
         writer.write(b'\x05\x01\x00')
-        await asyncio.wait_for(writer.drain(), timeout=timeout)
-        greeting_resp = await asyncio.wait_for(reader.readexactly(2), timeout=timeout)
+        await asyncio.wait_for(writer.drain(), timeout=0.5)
+        # Fast 0.5s sub-timeout: open non-SOCKS ports (HTTP 80/443/8080) won't stall workers
+        greeting_resp = await asyncio.wait_for(reader.readexactly(2), timeout=0.5)
         if greeting_resp != b'\x05\x00':
-            writer.close()
-            await writer.wait_closed()
             return False, 0.0
 
         # SOCKS5 CONNECT request: VER=5, CMD=1 (CONNECT), RSV=0, ATYP=1 (IPv4)
         target_ip_bytes = socket.inet_aton(TELEGRAM_TARGET[0])
         target_port_bytes = struct.pack(">H", TELEGRAM_TARGET[1])
         writer.write(b'\x05\x01\x00\x01' + target_ip_bytes + target_port_bytes)
-        await asyncio.wait_for(writer.drain(), timeout=timeout)
+        await asyncio.wait_for(writer.drain(), timeout=1.0)
 
         # Response: VER=5, REP=0 (Success), RSV=0, ATYP=1, BND.ADDR (4), BND.PORT (2) = 10 bytes
-        resp = await asyncio.wait_for(reader.readexactly(10), timeout=timeout)
-        writer.close()
-        await writer.wait_closed()
-
+        resp = await asyncio.wait_for(reader.readexactly(10), timeout=1.0)
         latency_ms = round((time.perf_counter() - t0) * 1000, 1)
-        if resp[1] == 0x00:  # 0x00 = succeeded
+        if resp[1] == 0x00:
             return True, latency_ms
         return False, 0.0
     except Exception:
         return False, 0.0
+    finally:
+        if writer is not None:
+            try:
+                writer.close()
+                await asyncio.wait_for(writer.wait_closed(), timeout=0.1)
+            except Exception:
+                pass
 
-async def scan_target(ip: str, port: int, sem: asyncio.Semaphore, timeout: float = 2.0) -> dict | None:
-    async with sem:
+def append_result(item: dict, out_dir: str):
+    """Incremental disk flush so results are never lost if interrupted."""
+    os.makedirs(out_dir, exist_ok=True)
+    raw_file = os.path.join(out_dir, "working_socks.txt")
+    tg_file = os.path.join(out_dir, "tg_links.txt")
+    ip, port, lat = item["ip"], item["port"], item["latency"]
+    tag = f"🇮🇷-Socks-{ip}:{port}-{lat}ms"
+    with open(raw_file, "a", encoding="utf-8") as f:
+        f.write(f"socks://{ip}:{port}#{tag}\n")
+    with open(tg_file, "a", encoding="utf-8") as f:
+        f.write(f"https://t.me/socks?server={ip}&port={port}\n")
+
+# ponytail: worker pool with queue; handles 100k+ probes in constant memory vs coroutine explosion.
+async def worker(queue: asyncio.Queue, working: list[dict], stats: dict, out_dir: str, timeout: float):
+    while True:
+        try:
+            target = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+        ip, port = target
         ok, latency = await test_socks5(ip, port, timeout=timeout)
+        stats["done"] += 1
         if ok:
+            item = {"ip": ip, "port": port, "latency": latency}
+            working.append(item)
             print(f"  [+] FOUND: {ip}:{port} ({latency}ms)")
-            return {"ip": ip, "port": port, "latency": latency}
-        return None
+            append_result(item, out_dir)
+        queue.task_done()
 
-async def run_scan(ips: list[str], ports: list[int], concurrency: int = 150, timeout: float = 2.0):
-    sem = asyncio.Semaphore(concurrency)
-    tasks = [scan_target(ip, port, sem, timeout) for ip in ips for port in ports]
-    print(f"[*] Scanning {len(ips)} IPs on {len(ports)} candidate ports ({len(tasks)} targets) with {concurrency} workers...")
-    results = await asyncio.gather(*tasks)
-    working = [r for r in results if r]
+async def progress_reporter(stats: dict, total: int):
+    t_start = time.perf_counter()
+    while stats["done"] < total:
+        await asyncio.sleep(1.0)
+        done = stats["done"]
+        elapsed = time.perf_counter() - t_start
+        rate = round(done / elapsed, 1) if elapsed > 0 else 0
+        pct = round((done / total) * 100, 1)
+        print(f"\r[*] Progress: {done}/{total} ({pct}%) | Found: {len(stats['found'])} | Rate: {rate} probes/s", end="", flush=True)
+
+async def run_scan(ips: list[str], ports: list[int], concurrency: int = 150, timeout: float = 2.0, out_dir: str = "output"):
+    total_targets = len(ips) * len(ports)
+    print(f"[*] Scanning {len(ips)} IPs on {len(ports)} candidate ports ({total_targets} targets) with {concurrency} workers...")
+
+    # Clear old results for fresh run
+    os.makedirs(out_dir, exist_ok=True)
+    for fname in ["working_socks.txt", "tg_links.txt", "sub.txt"]:
+        fpath = os.path.join(out_dir, fname)
+        if os.path.exists(fpath):
+            open(fpath, "w").close()
+
+    queue = asyncio.Queue()
+    for ip in ips:
+        for port in ports:
+            queue.put_nowait((ip, port))
+
+    working = []
+    stats = {"done": 0, "found": working}
+
+    reporter_task = asyncio.create_task(progress_reporter(stats, total_targets))
+    workers = [asyncio.create_task(worker(queue, working, stats, out_dir, timeout)) for _ in range(concurrency)]
+
+    await queue.join()
+    reporter_task.cancel()
+    await asyncio.gather(*workers, return_exceptions=True)
+
+    print(f"\r[*] Completed {total_targets}/{total_targets} (100.0%)                                    ")
     working.sort(key=lambda x: x["latency"])
     return working
 
@@ -132,7 +188,7 @@ def main():
 
     # ponytail: default loop handles ~500 sockets fine; use uvloop on Linux when scaling > 5k.
 
-    working = asyncio.run(run_scan(ips, ports, concurrency=args.concurrency, timeout=args.timeout))
+    working = asyncio.run(run_scan(ips, ports, concurrency=args.concurrency, timeout=args.timeout, out_dir=args.out))
     print(f"\n[+] Scan finished: {len(working)} working proxies found out of {len(ips) * len(ports)} probes.")
     save_results(working, args.out)
 

@@ -33,7 +33,7 @@ def run_pipeline(input_path: str, threads: int = 16, timeout: float = 4.0):
         TESTER_SCRIPT,
         "-i", input_path,
         "-o", TEMP_OUTPUT,
-        "-t", "1",
+        "-t", "3",  # Target 3: Google Gemini (https://gemini.google.com/app)
         "--threads", str(threads),
         "--timeout", str(timeout),
         "--rounds", "1",
