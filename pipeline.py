@@ -10,6 +10,7 @@ Full Automation Pipeline:
 """
 
 import argparse
+import base64
 import os
 import subprocess
 import sys
@@ -57,15 +58,21 @@ def run_pipeline(input_path: str, threads: int = 16, timeout: float = 4.0):
 
     print(f"[✓] Found {len(verified_lines)} verified working configs!")
 
-    # Write to output/sub.txt
+    # Write to output/sub.txt (Base64 encoded for v2rayN / v2rayNG subscription)
+    raw_sub_file = os.path.join(BASE_DIR, "output", "raw_sub.txt")
     os.makedirs(os.path.dirname(SUB_FILE), exist_ok=True)
-    with open(SUB_FILE, "w", encoding="utf-8") as f:
-        f.write("\n".join(verified_lines) + "\n")
+    raw_content = "\n".join(verified_lines)
+    b64_content = base64.b64encode(raw_content.encode("utf-8")).decode("ascii")
 
-    # Copy to Windows Clipboard
+    with open(SUB_FILE, "w", encoding="utf-8") as f:
+        f.write(b64_content)
+    with open(raw_sub_file, "w", encoding="utf-8") as f:
+        f.write(raw_content)
+
+    # Copy raw plaintext to Windows Clipboard
     try:
         subprocess.run(
-            ["powershell.exe", "-Command", f"Get-Content -Raw '{SUB_FILE}' | Set-Clipboard"],
+            ["powershell.exe", "-Command", f"Get-Content -Raw '{raw_sub_file}' | Set-Clipboard"],
             check=False
         )
         print("[✓] Copied to Windows Clipboard!")
@@ -75,7 +82,7 @@ def run_pipeline(input_path: str, threads: int = 16, timeout: float = 4.0):
     # Git commit & push
     try:
         print("[*] Pushing update to GitHub...")
-        subprocess.run(["git", "add", "output/sub.txt"], cwd=BASE_DIR, check=True)
+        subprocess.run(["git", "add", "output/sub.txt", "output/raw_sub.txt"], cwd=BASE_DIR, check=True)
         commit_msg = f"chore: update subscription with {len(verified_lines)} verified configs"
         subprocess.run(["git", "commit", "-m", commit_msg], cwd=BASE_DIR, check=True)
         subprocess.run(["git", "push", "origin", "main"], cwd=BASE_DIR, check=True)
